@@ -1,0 +1,875 @@
+jobfinder/
+├── package.json            # deps + scripts (start/dev/migrate/seed/test)
+├── .env.example            # placeholder config only
+├── .gitignore
+├── database/
+│   ├── schema.sql          # 18 normalized tables, FKs, indexes, constraints
+│   ├── migrate.js          # schema runner
+│   └── seed.js             # realistic dev data (bcrypt-hashed passwords)
+├── server/
+│   ├── index.js            # app wiring: helmet, sessions, CSRF, static, routes
+│   ├── config.js  db.js    # env config + mysql2 pool + transactions
+│   ├── middleware/         # auth/RBAC, CSRF, rate limits, validation, errors
+│   ├── utils/helpers.js    # audit log + notifications
+│   └── routes/             # auth, jobs, applications, saved, profiles,
+│                           # resumes (multer/PDF), candidates, notifications,
+│                           # admin, contact
+└── public/
+    ├── css/style.css       # full blue/white/gray design system, responsive
+    ├── js/api.js main.js   # fetch client w/ CSRF, navbar/footer, toasts
+    ├── js/home.js jobs.js job-details.js
+    ├── index.html  jobs.html  job-details.html  login.html  register.html
+const [[usersByRole]] = [null];   // ← DELETE this line
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>My Dashboard — JobFinder</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <nav class="navbar" id="navbar"></nav>
+  <div class="dash">
+    <aside class="sidebar">
+      <div class="side-title">Job Seeker</div>
+      <a href="/seeker-dashboard.html" class="active"><i class="fa-solid fa-gauge-high"></i> Overview</a>
+      <a href="/applications.html"><i class="fa-solid fa-file-lines"></i> My Applications</a>
+      <a href="/seeker-dashboard.html#saved"><i class="fa-solid fa-bookmark"></i> Saved Jobs</a>
+      <a href="/seeker-profile.html"><i class="fa-solid fa-user"></i> My Profile</a>
+      <a href="/jobs.html"><i class="fa-solid fa-magnifying-glass"></i> Find Jobs</a>
+    </aside>
+    <main class="dash-main" id="main"><div class="spinner"></div></main>
+  </div>
+  <footer class="footer" id="site-footer"></footer>
+  <script src="/js/api.js"></script><script src="/js/main.js"></script>
+  <script>
+  (async function () {
+    const { API, esc, statusBadge, money } = JobFinder;
+    const user = await JobFinder.requireRole('seeker');
+    if (!user) return;
+    const main = document.getElementById('main');
+    const [apps, notifs, saved] = await Promise.all([
+      API.get('/api/applications/mine'), API.get('/api/notifications'),
+      API.get('/api/saved-jobs'),
+    ]);
+    const by = (s) => apps.applications.filter(a => a.status === s).length;
+    main.innerHTML = `
+      <div class="dash-header"><h1>Welcome, ${esc(user.profile?.full_name || user.email)}</h1>
+        <a class="btn" href="/jobs.html"><i class="fa-solid fa-magnifying-glass"></i> Browse jobs</a></div>
+      <div class="kpi-grid">
+        <div class="kpi"><i class="fa-solid fa-file-lines"></i><div class="kpi-num">${apps.applications.length}</div><div class="kpi-lbl">Total applications</div></div>
+        <div class="kpi"><i class="fa-solid fa-eye"></i><div class="kpi-num">${by('under_review')}</div><div class="kpi-lbl">Under review</div></div>
+        <div class="kpi"><i class="fa-solid fa-star"></i><div class="kpi-num">${by('shortlisted')}</div><div class="kpi-lbl">Shortlisted</div></div>
+        <div class="kpi"><i class="fa-solid fa-bell"></i><div class="kpi-num">${notifs.unread}</div><div class="kpi-lbl">Unread notifications</div></div>
+      </div>
+      <h2 class="section-title" style="font-size:1.15rem;">Recent applications</h2>
+      <div class="table-wrap mb-2"><table class="table"><thead><tr><th>Job</th><th>Company</th><th>Status</th><th>Applied</th></tr></thead>
+      <tbody>${apps.applications.slice(0, 8).map(a => `<tr>
+        <td><a href="/job-details.html?id=${a.job_id}">${esc(a.title)}</a></td>
+        <td>${esc(a.company_name)}</td><td>${statusBadge(a.status)}</td>
+        <td>${new Date(a.applied_at).toLocaleDateString()}</td></tr>`).join('') ||
+        '<tr><td colspan="4" class="text-muted">No applications yet — find a job and apply!</td></tr>'}</tbody></table></div>
+      <div class="grid grid-2">
+        <div class="card" id="saved">
+          <h3 style="margin-bottom:.7rem;"><i class="fa-solid fa-bookmark"></i> Saved jobs (${saved.jobs.length})</h3>
+          ${saved.jobs.slice(0, 5).map(j => `<p><a href="/job-details.html?id=${j.id}">${esc(j.title)}</a>
+            <span class="text-muted">— ${esc(j.company_name)}, ${money(j.salary_min, j.salary_max, j.currency)}</span></p>`).join('') ||
+            '<p class="text-muted">No saved jobs yet.</p>'}
+        </div>
+        <div class="card">
+          <h3 style="margin-bottom:.7rem;"><i class="fa-solid fa-bell"></i> Notifications</h3>
+          ${notifs.notifications.slice(0, 6).map(n => `<p style="font-size:.9rem;">
+            <strong>${esc(n.title)}</strong><br><span class="text-muted">${esc(n.message || '')}</span></p>`).join('') ||
+            '<p class="text-muted">You are all caught up.</p>'}
+          <button class="btn btn-ghost btn-sm mt-1" id="read-all">Mark all read</button>
+        </div>
+      </div>`;
+    document.getElementById('read-all').addEventListener('click', async () => {
+      await API.patch('/api/notifications/read-all'); location.reload();
+    });
+  })();
+  </script>
+</body>
+</html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>My Profile — JobFinder</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <nav class="navbar" id="navbar"></nav>
+  <div class="dash">
+    <aside class="sidebar">
+      <div class="side-title">Job Seeker</div>
+      <a href="/seeker-dashboard.html"><i class="fa-solid fa-gauge-high"></i> Overview</a>
+      <a href="/applications.html"><i class="fa-solid fa-file-lines"></i> My Applications</a>
+      <a href="/seeker-profile.html" class="active"><i class="fa-solid fa-user"></i> My Profile</a>
+      <a href="/jobs.html"><i class="fa-solid fa-magnifying-glass"></i> Find Jobs</a>
+    </aside>
+    <main class="dash-main">
+      <div class="dash-header"><h1>My Profile</h1></div>
+      <div class="msg" id="prof-msg"></div>
+      <form id="prof-form" class="card" style="margin-bottom:1.2rem;">
+        <div class="form-row">
+          <div class="field"><label>Full name *</label><input name="full_name" required></div>
+          <div class="field"><label>Phone</label><input name="phone"></div>
+        </div>
+        <div class="form-row">
+          <div class="field"><label>City</label><input name="city"></div>
+          <div class="field"><label>Country</label><input name="country"></div>
+        </div>
+        <div class="field"><label>Professional headline</label><input name="headline" placeholder="e.g. Full-Stack Developer"></div>
+        <div class="field"><label>Career objective / summary</label><textarea name="summary"></textarea></div>
+        <div class="form-row-3">
+          <div class="field"><label>Expected salary</label><input name="expected_salary" type="number" min="0"></div>
+          <div class="field"><label>Years of experience</label><input name="years_experience" type="number" min="0"></div>
+          <div class="field"><label>Preferred job type</label>
+            <select name="preferred_job_type"><option value="">Any</option><option>full-time</option><option>part-time</option><option>contract</option><option>internship</option><option>freelance</option></select></div>
+        </div>
+        <div class="form-row">
+          <div class="field"><label>Preferred location</label><input name="preferred_location"></div>
+          <div class="field"><label>LinkedIn / portfolio URL</label><input name="linkedin_url" type="url"></div>
+        </div>
+        <h3 style="margin:.6rem 0;">Education <button type="button" class="btn btn-ghost btn-sm" id="add-edu">+ Add</button></h3>
+        <div id="edu-list"></div>
+        <h3 style="margin:.6rem 0;">Work experience <button type="button" class="btn btn-ghost btn-sm" id="add-exp">+ Add</button></h3>
+        <div id="exp-list"></div>
+        <div class="field"><label>Skills (comma separated)</label><input name="skills" placeholder="JavaScript, SQL, Project Management"></div>
+        <div class="field checkbox-row"><input type="checkbox" name="is_public" id="is_public">
+          <label for="is_public" style="font-weight:400;">Make my profile visible to verified employers</label></div>
+        <button class="btn" type="submit"><i class="fa-solid fa-floppy-disk"></i> Save profile</button>
+      </form>
+      <div class="card" style="margin-bottom:1.2rem;">
+        <h3 style="margin-bottom:.7rem;"><i class="fa-solid fa-file-pdf"></i> Resume (PDF)</h3>
+        <div id="resume-list" class="mb-1"></div>
+        <div class="flex"><input type="file" id="resume-file" accept="application/pdf">
+        <button class="btn btn-outline btn-sm" id="upload-resume"><i class="fa-solid fa-upload"></i> Upload</button></div>
+        <p class="hint">PDF only, max 5 MB. New uploads become your current resume.</p>
+      </div>
+      <div class="grid grid-2">
+        <div class="card">
+          <h3 style="margin-bottom:.7rem;"><i class="fa-solid fa-key"></i> Change password</h3>
+          <div class="msg" id="pw-msg"></div>
+          <div class="field"><input type="password" id="pw-cur" placeholder="Current password"></div>
+          <div class="field"><input type="password" id="pw-new" placeholder="New password (8+ chars)"></div>
+          <button class="btn btn-outline btn-sm" id="change-pw">Update password</button>
+        </div>
+        <div class="card" style="border-color:#fecaca;">
+          <h3 style="margin-bottom:.7rem; color:var(--danger);"><i class="fa-solid fa-triangle-exclamation"></i> Danger zone</h3>
+          <p class="text-muted" style="font-size:.9rem;">Deleting your account anonymizes your profile and hides it from employers. This cannot be undone.</p>
+          <button class="btn btn-danger btn-sm mt-1" id="delete-account">Delete my account</button>
+        </div>
+      </div>
+    </main>
+  </div>
+  <script src="/js/api.js"></script><script src="/js/main.js"></script>
+  <script>
+  (async function () {
+    const { API, esc, toast } = JobFinder;
+    if (!await JobFinder.requireRole('seeker')) return;
+    const form = document.getElementById('prof-form');
+    let profile = null;
+    try { profile = (await API.get('/api/profile')).profile; } catch (e) { return; }
+
+    const eduRow = (e = {}) => `<div class="form-row-3 edu-row" style="grid-template-columns:2fr 1fr 1fr 1fr 1fr auto;">
+      <input placeholder="Institution" class="e-inst" value="${esc(e.institution || '')}">
+      <input placeholder="Degree" class="e-deg" value="${esc(e.degree || '')}">
+      <input placeholder="Field" class="e-field" value="${esc(e.field || '')}">
+      <input placeholder="From" class="e-start" value="${esc(e.start_year || '')}">
+      <input placeholder="To" class="e-end" value="${esc(e.end_year || '')}">
+      <button type="button" class="btn btn-ghost btn-sm row-del"><i class="fa-solid fa-xmark"></i></button></div>`;
+    const expRow = (x = {}) => `<div class="form-row-3 exp-row" style="grid-template-columns:2fr 2fr 2fr 1fr 1fr auto;">
+      <input placeholder="Company" class="x-comp" value="${esc(x.company || '')}">
+      <input placeholder="Job title" class="x-title" value="${esc(x.title || '')}">
+      <input placeholder="Description" class="x-desc" value="${esc(x.description || '')}">
+      <input placeholder="Start (YYYY-MM)" class="x-start" value="${esc(x.start_date || '')}">
+      <input placeholder="End" class="x-end" value="${esc(x.end_date || '')}">
+      <button type="button" class="btn btn-ghost btn-sm row-del"><i class="fa-solid fa-xmark"></i></button></div>`;
+
+    for (const k of ['full_name','phone','city','country','headline','summary','expected_salary','years_experience','preferred_location','preferred_job_type','linkedin_url'])
+      if (form.elements[k] && profile[k] != null) form.elements[k].value = profile[k];
+    form.elements.is_public.checked = !!profile.is_public;
+    form.elements.skills.value = (profile.skills || []).map(s => s.name).join(', ');
+    document.getElementById('edu-list').innerHTML = (profile.education || []).map(eduRow).join('') || eduRow();
+    document.getElementById('exp-list').innerHTML = (profile.experience || []).map(expRow).join('') || expRow();
+
+    const list = document.getElementById('resume-list');
+    function renderResumes() {
+      list.innerHTML = (profile.resumes || []).map(r => `<div class="flex" style="justify-content:space-between;">
+        <span><i class="fa-solid fa-file-pdf" style="color:var(--danger);"></i> ${esc(r.original_name)}
+        ${r.is_current ? '<span class="badge badge-green">current</span>' : ''}</span>
+        <span class="flex"><a class="btn btn-ghost btn-sm" href="/api/resumes/${r.id}/download" target="_blank"><i class="fa-solid fa-eye"></i></a>
+        <button class="btn btn-danger btn-sm" data-del-resume="${r.id}"><i class="fa-solid fa-trash"></i></button></span></div>`).join('')
+        || '<p class="text-muted">No resume uploaded yet.</p>';
+    }
+    renderResumes();
+
+    document.getElementById('add-edu').onclick = () => document.getElementById('edu-list').insertAdjacentHTML('beforeend', eduRow());
+    document.getElementById('add-exp').onclick = () => document.getElementById('exp-list').insertAdjacentHTML('beforeend', expRow());
+    document.body.addEventListener('click', (e) => { if (e.target.closest('.row-del')) e.target.closest('.form-row-3').remove(); });
+
+    form.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const msg = document.getElementById('prof-msg');
+      const body = Object.fromEntries(new FormData(form).entries());
+      body.is_public = form.elements.is_public.checked;
+      body.education = [...document.querySelectorAll('.edu-row')].map(r => ({
+        institution: r.querySelector('.e-inst').value, degree: r.querySelector('.e-deg').value,
+        field: r.querySelector('.e-field').value, start_year: r.querySelector('.e-start').value, end_year: r.querySelector('.e-end').value }));
+      body.experience = [...document.querySelectorAll('.exp-row')].map(r => ({
+        company: r.querySelector('.x-comp').value, title: r.querySelector('.x-title').value,
+        description: r.querySelector('.x-desc').value, start_date: r.querySelector('.x-start').value, end_date: r.querySelector('.x-end').value }));
+      body.skills = body.skills.split(',').map(s => s.trim()).filter(Boolean);
+      try {
+        await API.put('/api/profile', body);
+        msg.className = 'msg msg-success show'; msg.textContent = 'Profile saved successfully.';
+      } catch (err) { msg.className = 'msg msg-error show'; msg.textContent = err.message; }
+    });
+
+    document.getElementById('upload-resume').addEventListener('click', async () => {
+      const f = document.getElementById('resume-file').files[0];
+      if (!f) return toast('Choose a PDF file first.', 'error');
+      const fd = new FormData(); fd.append('resume', f);
+      try {
+        await API.upload('/api/resumes', fd);
+        profile = (await API.get('/api/profile')).profile; renderResumes();
+        toast('Resume uploaded.', 'success');
+      } catch (err) { toast(err.message, 'error'); }
+    });
+    list.addEventListener('click', async (e) => {
+      const id = e.target.closest('[data-del-resume]')?.dataset.delResume; if (!id) return;
+      await API.del('/api/resumes/' + id);
+      profile.resumes = profile.resumes.filter(r => r.id != id); renderResumes();
+    });
+    document.getElementById('change-pw').addEventListener('click', async () => {
+      const msg = document.getElementById('pw-msg');
+      try {
+        await API.put('/api/auth/password', { current_password: document.getElementById('pw-cur').value, new_password: document.getElementById('pw-new').value });
+        msg.className = 'msg msg-success show'; msg.textContent = 'Password updated.';
+      } catch (err) { msg.className = 'msg msg-error show'; msg.textContent = err.message; }
+    });
+    document.getElementById('delete-account').addEventListener('click', async () => {
+      if (!confirm('Really delete your account? This cannot be undone.')) return;
+      await API.del('/api/auth/account');
+      localStorage.removeItem('jf_csrf'); location.href = '/';
+    });
+  })();
+  </script>
+</body>
+</html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Employer Dashboard — JobFinder</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <nav class="navbar" id="navbar"></nav>
+  <div class="dash">
+    <aside class="sidebar">
+      <div class="side-title">Employer</div>
+      <a href="/employer-dashboard.html" class="active"><i class="fa-solid fa-gauge-high"></i> Overview</a>
+      <a href="/post-job.html"><i class="fa-solid fa-plus"></i> Post a Job</a>
+      <a href="/applications.html"><i class="fa-solid fa-users"></i> Applications</a>
+      <a href="/candidates.html"><i class="fa-solid fa-magnifying-glass"></i> Find Candidates</a>
+    </aside>
+    <main class="dash-main" id="main"><div class="spinner"></div></main>
+  </div>
+  <footer class="footer" id="site-footer"></footer>
+  <script src="/js/api.js"></script><script src="/js/main.js"></script>
+  <script>
+  (async function () {
+    const { API, esc, statusBadge } = JobFinder;
+    const user = await JobFinder.requireRole('employer'); if (!user) return;
+    const main = document.getElementById('main');
+    let jobs, received, company;
+    try { [jobs, received, company] = await Promise.all([
+      API.get('/api/jobs/mine'), API.get('/api/applications/received'), API.get('/api/profile')]); }
+    catch (e) { main.innerHTML = `<div class="empty-state"><p>${esc(e.message)}</p></div>`; return; }
+    const active = jobs.jobs.filter(j => j.status === 'active');
+    const views = jobs.jobs.reduce((s, j) => s + j.views, 0);
+    const counts = Object.fromEntries(received.counts.map(c => [c.status, c.n]));
+    main.innerHTML = `
+      <div class="dash-header"><div><h1>${esc(company.profile.company_name || 'Company')}</h1>
+        <p class="text-muted">${company.profile.verified ? '<span class="badge badge-green"><i class="fa-solid fa-circle-check"></i> Verified employer</span>' : '<span class="badge badge-orange">Verification pending</span>'}</p></div>
+        <a class="btn" href="/post-job.html"><i class="fa-solid fa-plus"></i> Post a job</a></div>
+      <div class="kpi-grid">
+        <div class="kpi"><i class="fa-solid fa-briefcase"></i><div class="kpi-num">${active.length}</div><div class="kpi-lbl">Active jobs</div></div>
+        <div class="kpi"><i class="fa-solid fa-eye"></i><div class="kpi-num">${views}</div><div class="kpi-lbl">Total views</div></div>
+        <div class="kpi"><i class="fa-solid fa-file-lines"></i><div class="kpi-num">${received.applications.length}</div><div class="kpi-lbl">Applications</div></div>
+        <div class="kpi"><i class="fa-solid fa-star"></i><div class="kpi-num">${counts.shortlisted || 0}</div><div class="kpi-lbl">Shortlisted</div></div>
+      </div>
+      <h2 class="section-title" style="font-size:1.15rem;">My job listings</h2>
+      <div class="table-wrap"><table class="table"><thead><tr><th>Title</th><th>Status</th><th>Views</th><th>Apps</th><th>Deadline</th><th>Actions</th></tr></thead>
+      <tbody>${jobs.jobs.map(j => `<tr>
+        <td><a href="/job-details.html?id=${j.id}">${esc(j.title)}</a></td>
+        <td>${statusBadge(j.status)}</td><td>${j.views}</td>
+        <td><a href="/applications.html?job_id=${j.id}">${j.applications_count}</a></td>
+        <td>${j.application_deadline || '—'}</td>
+        <td class="flex" style="flex-wrap:nowrap;">
+          <a class="btn btn-ghost btn-sm" href="/post-job.html?id=${j.id}"><i class="fa-solid fa-pen"></i></a>
+          ${j.status !== 'closed' ? `<button class="btn btn-outline btn-sm" data-status="${j.id}:closed">Close</button>` : ''}
+          ${j.status === 'active' ? `<button class="btn btn-ghost btn-sm" data-status="${j.id}:paused">Pause</button>` : ''}
+          ${j.status === 'paused' ? `<button class="btn btn-ghost btn-sm" data-status="${j.id}:active">Resume</button>` : ''}
+          <button class="btn btn-danger btn-sm" data-del="${j.id}"><i class="fa-solid fa-trash"></i></button>
+        </td></tr>`).join('') || '<tr><td colspan="6" class="text-muted">No listings yet — post your first job!</td></tr>'}</tbody></table></div>
+      <h2 class="section-title mt-3" style="font-size:1.15rem;">Recent applications</h2>
+      <div class="table-wrap"><table class="table"><thead><tr><th>Candidate</th><th>Job</th><th>Status</th><th>Applied</th></tr></thead>
+      <tbody>${received.applications.slice(0, 8).map(a => `<tr>
+        <td>${esc(a.full_name)}</td><td>${esc(a.job_title)}</td><td>${statusBadge(a.status)}</td>
+        <td>${new Date(a.applied_at).toLocaleDateString()}</td></tr>`).join('') || '<tr><td colspan="4" class="text-muted">No applications received yet.</td></tr>'}</tbody></table></div>`;
+    main.addEventListener('click', async (e) => {
+      const st = e.target.closest('[data-status]')?.dataset.status;
+      const del = e.target.closest('[data-del]')?.dataset.del;
+      if (st) { const [id, status] = st.split(':'); await API.patch(`/api/jobs/${id}/status`, { status }); location.reload(); }
+      if (del && confirm('Delete this listing and all its applications?')) { await API.del('/api/jobs/' + del); location.reload(); }
+    });
+  })();
+  </script>
+</body>
+</html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Post a Job — JobFinder</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <nav class="navbar" id="navbar"></nav>
+  <div class="dash">
+    <aside class="sidebar">
+      <a href="/employer-dashboard.html"><i class="fa-solid fa-gauge-high"></i> Overview</a>
+      <a href="/post-job.html" class="active"><i class="fa-solid fa-plus"></i> Post a Job</a>
+      <a href="/applications.html"><i class="fa-solid fa-users"></i> Applications</a>
+      <a href="/candidates.html"><i class="fa-solid fa-magnifying-glass"></i> Find Candidates</a>
+    </aside>
+    <main class="dash-main">
+      <div class="dash-header"><h1 id="page-title">Post a new vacancy</h1></div>
+      <div class="msg" id="job-msg"></div>
+      <form id="job-form" class="card">
+        <div class="form-row">
+          <div class="field"><label>Job title *</label><input name="title" required></div>
+          <div class="field"><label>Category *</label><select name="category_id" required></select></div>
+        </div>
+        <div class="field"><label>Job description *</label><textarea name="description" required></textarea></div>
+        <div class="field"><label>Responsibilities</label><textarea name="responsibilities"></textarea></div>
+        <div class="field"><label>Required qualifications</label><textarea name="qualifications"></textarea></div>
+        <div class="field"><label>Required skills</label><input name="skills_required" placeholder="e.g. Node.js, SQL, AWS"></div>
+        <div class="form-row-3">
+          <div class="field"><label>Experience level</label><select name="experience_level">
+            <option value="any">Any</option><option value="entry">Entry</option><option value="mid">Mid</option>
+            <option value="senior">Senior</option><option value="executive">Executive</option></select></div>
+          <div class="field"><label>Employment type *</label><select name="employment_type" required>
+            <option value="full-time">Full-time</option><option value="part-time">Part-time</option>
+            <option value="contract">Contract</option><option value="internship">Internship</option>
+            <option value="freelance">Freelance</option></select></div>
+          <div class="field"><label>Workplace *</label><select name="workplace_type" required>
+            <option value="onsite">On-site</option><option value="remote">Remote</option><option value="hybrid">Hybrid</option></select></div>
+        </div>
+        <div class="form-row">
+          <div class="field"><label>City *</label><input name="city" required></div>
+          <div class="field"><label>Country *</label><input name="country" required></div>
+        </div>
+        <div class="form-row-3">
+          <div class="field"><label>Salary min</label><input name="salary_min" type="number" min="0"></div>
+          <div class="field"><label>Salary max</label><input name="salary_max" type="number" min="0"></div>
+          <div class="field"><label>Currency</label><input name="currency" value="USD" maxlength="3"></div>
+        </div>
+        <div class="form-row">
+          <div class="field"><label>Number of vacancies</label><input name="vacancies" type="number" min="1" value="1"></div>
+          <div class="field"><label>Application deadline</label><input name="application_deadline" type="date"></div>
+        </div>
+        <button class="btn" type="submit"><i class="fa-solid fa-paper-plane"></i> <span id="submit-label">Publish job</span></button>
+      </form>
+    </main>
+  </div>
+  <script src="/js/api.js"></script><script src="/js/main.js"></script>
+  <script>
+  (async function () {
+    const { API, esc, toast } = JobFinder;
+    if (!await JobFinder.requireRole('employer')) return;
+    const form = document.getElementById('job-form');
+    const msg = document.getElementById('job-msg');
+    const id = JobFinder.qs().id;
+    const { categories } = await API.get('/api/jobs/categories');
+    form.elements.category_id.innerHTML = categories.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
+    if (id) {
+      document.getElementById('page-title').textContent = 'Edit vacancy';
+      document.getElementById('submit-label').textContent = 'Save changes';
+      try {
+        const { job } = await API.get('/api/jobs/' + id);
+        for (const [k, v] of Object.entries(job)) if (form.elements[k] && v != null) form.elements[k].value = v;
+      } catch (e) { msg.className = 'msg msg-error show'; msg.textContent = e.message; }
+    }
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const body = Object.fromEntries(new FormData(form).entries());
+      try {
+        if (id) { await API.put('/api/jobs/' + id, body); toast('Job updated.', 'success'); }
+        else { const r = await API.post('/api/jobs', body); toast('Job published!', 'success'); location.href = '/job-details.html?id=' + r.id; return; }
+        location.href = '/employer-dashboard.html';
+      } catch (err) { msg.className = 'msg msg-error show'; msg.textContent = err.message; }
+    });
+  })();
+  </script>
+</body>
+</html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Find Candidates — JobFinder</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <nav class="navbar" id="navbar"></nav>
+  <div class="dash">
+    <aside class="sidebar">
+      <a href="/employer-dashboard.html"><i class="fa-solid fa-gauge-high"></i> Overview</a>
+      <a href="/post-job.html"><i class="fa-solid fa-plus"></i> Post a Job</a>
+      <a href="/applications.html"><i class="fa-solid fa-users"></i> Applications</a>
+      <a href="/candidates.html" class="active"><i class="fa-solid fa-magnifying-glass"></i> Find Candidates</a>
+    </aside>
+    <main class="dash-main">
+      <div class="dash-header"><h1>Candidate Database</h1></div>
+      <p class="text-muted mb-2" style="font-size:.9rem;"><i class="fa-solid fa-lock"></i>
+        Only approved (verified) employers can browse candidates. Contact details are shared with candidates who applied to your jobs or made their profile public.</p>
+      <div class="layout-2col" style="grid-template-columns:260px 1fr;">
+        <form class="card" id="cand-form">
+          <div class="field"><label>Keyword</label><input name="q" placeholder="Name or headline"></div>
+          <div class="field"><label>Skills</label><input name="skill" placeholder="e.g. Node.js, SQL"></div>
+          <div class="field"><label>City</label><input name="city"></div>
+          <div class="field"><label>Country</label><input name="country"></div>
+          <div class="field"><label>Min. experience (yrs)</label><input name="min_experience" type="number" min="0"></div>
+          <div class="field"><label>Max expected salary</label><input name="max_salary" type="number" min="0"></div>
+          <div class="field"><label>Preferred type</label><select name="job_type">
+            <option value="">Any</option><option>full-time</option><option>part-time</option>
+            <option>contract</option><option>internship</option><option>freelance</option></select></div>
+          <button class="btn btn-block" type="submit"><i class="fa-solid fa-filter"></i> Search</button>
+        </form>
+        <div><div id="cand-list"><div class="spinner"></div></div></div>
+      </div>
+    </main>
+  </div>
+  <script src="/js/api.js"></script><script src="/js/main.js"></script>
+  <script>
+  (async function () {
+    const { API, esc, money, toast } = JobFinder;
+    if (!await JobFinder.requireRole('employer')) return;
+    const list = document.getElementById('cand-list');
+    const form = document.getElementById('cand-form');
+    async function search(page = 1) {
+      list.innerHTML = '<div class="spinner"></div>';
+      const p = new URLSearchParams(new FormData(form)); p.set('page', page);
+      for (const [k, v] of [...p.entries()]) if (!v.trim()) p.delete(k);
+      try {
+        const d = await API.get('/api/candidates?' + p);
+        list.innerHTML = d.candidates.map(c => `
+          <div class="card card-hover job-card" style="margin-bottom:1rem;">
+            <div class="job-card-top">
+              <div><div class="job-title">${esc(c.full_name)}</div>
+              <div class="company-name">${esc(c.headline || 'Candidate')}</div></div>
+              ${c.expected_salary ? `<span class="salary">${money(0, c.expected_salary)}</span>` : ''}
+            </div>
+            <div class="job-meta">
+              <span><i class="fa-solid fa-location-dot"></i> ${esc(c.city || '—')}, ${esc(c.country || '')}</span>
+              <span><i class="fa-solid fa-briefcase"></i> ${c.years_experience ?? 0} yrs exp</span>
+              ${c.preferred_job_type ? `<span><i class="fa-solid fa-clock"></i> ${esc(c.preferred_job_type)}</span>` : ''}
+            </div>
+            <div>${(c.skills || []).map(s => `<span class="tag">${esc(s)}</span>`).join('')}</div>
+          </div>`).join('') ||
+          '<div class="empty-state"><i class="fa-solid fa-users"></i><p>No candidates match your filters.</p></div>';
+      } catch (e) {
+        list.innerHTML = `<div class="empty-state"><i class="fa-solid fa-lock"></i><p>${esc(e.message)}</p></div>`;
+      }
+    }
+    form.addEventListener('submit', (e) => { e.preventDefault(); search(); });
+    search();
+  })();
+  </script>
+</body>
+</html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Applications — JobFinder</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <nav class="navbar" id="navbar"></nav>
+  <div class="dash">
+    <aside class="sidebar" id="app-side"></aside>
+    <main class="dash-main" id="main"><div class="spinner"></div></main>
+  </div>
+  <footer class="footer" id="site-footer"></footer>
+  <script src="/js/api.js"></script><script src="/js/main.js"></script>
+  <script>
+  (async function () {
+    const { API, esc, statusBadge, toast } = JobFinder;
+    const user = await JobFinder.requireRole(); if (!user) return;
+    const main = document.getElementById('main');
+    const side = document.getElementById('app-side');
+    const isSeeker = user.role === 'seeker';
+    side.innerHTML = isSeeker ? `
+      <div class="side-title">Job Seeker</div>
+      <a href="/seeker-dashboard.html"><i class="fa-solid fa-gauge-high"></i> Overview</a>
+      <a href="/applications.html" class="active"><i class="fa-solid fa-file-lines"></i> My Applications</a>
+      <a href="/seeker-profile.html"><i class="fa-solid fa-user"></i> My Profile</a>` : `
+      <div class="side-title">Employer</div>
+      <a href="/employer-dashboard.html"><i class="fa-solid fa-gauge-high"></i> Overview</a>
+      <a href="/applications.html" class="active"><i class="fa-solid fa-users"></i> Applications</a>
+      <a href="/candidates.html"><i class="fa-solid fa-magnifying-glass"></i> Find Candidates</a>`;
+
+    if (isSeeker) {
+      const { applications } = await API.get('/api/applications/mine');
+      main.innerHTML = `<div class="dash-header"><h1>My Applications</h1></div>` +
+        (applications.map(a => `
+        <div class="card" style="margin-bottom:1rem;">
+          <div class="flex" style="justify-content:space-between;">
+            <div><a class="job-title" href="/job-details.html?id=${a.job_id}">${esc(a.title)}</a>
+              <div class="company-name">${esc(a.company_name)} · ${esc(a.city)}, ${esc(a.country)}</div></div>
+            <div>${statusBadge(a.status)}</div>
+          </div>
+          <p class="text-muted" style="font-size:.85rem;margin-top:.4rem;">Applied ${new Date(a.applied_at).toLocaleString()}</p>
+          ${(a.history || []).length ? `<details class="mt-1"><summary class="text-muted" style="font-size:.85rem;cursor:pointer;">Status history</summary>
+            <ul style="padding-left:1.2rem;font-size:.85rem;margin-top:.4rem;">${a.history.map(h =>
+              `<li>${esc(h.new_status.replace(/_/g, ' '))} — ${new Date(h.created_at).toLocaleString()}</li>`).join('')}</ul></details>` : ''}
+          ${!['withdrawn', 'hired', 'rejected'].includes(a.status) ?
+            `<button class="btn btn-ghost btn-sm mt-1" data-withdraw="${a.id}">Withdraw application</button>` : ''}
+        </div>`).join('') || '<div class="empty-state"><i class="fa-solid fa-file-lines"></i><p>No applications yet.</p></div>');
+      main.addEventListener('click', async (e) => {
+        const id = e.target.closest('[data-withdraw]')?.dataset.withdraw; if (!id) return;
+        if (!confirm('Withdraw this application?')) return;
+        await API.post(`/api/applications/${id}/withdraw`); toast('Application withdrawn.'); location.reload();
+      });
+    } else {
+      const d = await API.get('/api/applications/received');
+      main.innerHTML = `<div class="dash-header"><h1>Received Applications</h1></div>
+        <div class="table-wrap"><table class="table"><thead><tr><th>Candidate</th><th>Job</th><th>Contact</th><th>Resume</th><th>Status</th></tr></thead>
+        <tbody>${d.applications.map(a => `<tr>
+          <td><strong>${esc(a.full_name)}</strong><br><span class="text-muted" style="font-size:.84rem;">${esc(a.headline || '')}</span></td>
+          <td>${esc(a.job_title)}</td>
+          <td style="font-size:.85rem;">${a.contact_visible
+            ? `${esc(a.seeker_email || '')}<br>${esc(a.phone || '')}`
+            : '<span class="text-muted"><i class="fa-solid fa-lock"></i> hidden until shortlisted</span>'}</td>
+          <td>${a.resume_file_id ? `<a class="btn btn-ghost btn-sm" href="/api/resumes/${a.resume_file_id}/download" target="_blank"><i class="fa-solid fa-file-pdf"></i> View</a>` : '—'}</td>
+          <td><select data-app="${a.id}" style="padding:.35rem .5rem;border:1px solid var(--border);border-radius:8px;">
+            ${['submitted','under_review','shortlisted','interview_scheduled','offered','hired','rejected']
+              .map(s => `<option value="${s}" ${a.status === s ? 'selected' : ''}>${s.replace(/_/g, ' ')}</option>`).join('')}
+          </select></td></tr>`).join('') || '<tr><td colspan="5" class="text-muted">No applications received yet.</td></tr>'}</tbody></table></div>
+        <p class="hint mt-1">Changing a status notifies the candidate automatically and is recorded in the application history.</p>`;
+      main.addEventListener('change', async (e) => {
+        const sel = e.target.closest('[data-app]'); if (!sel) return;
+        try {
+          await API.patch(`/api/applications/${sel.dataset.app}/status`, { status: sel.value });
+          toast('Status updated — candidate notified.', 'success');
+        } catch (err) { toast(err.message, 'error'); }
+      });
+    }
+  })();
+  </script>
+</body>
+</html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Admin — JobFinder</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <nav class="navbar" id="navbar"></nav>
+  <div class="dash">
+    <aside class="sidebar">
+      <div class="side-title">Administration</div>
+      <a href="#overview" class="tab active" data-tab="overview"><i class="fa-solid fa-chart-pie"></i> Overview</a>
+      <a href="#users" class="tab" data-tab="users"><i class="fa-solid fa-users"></i> Users</a>
+      <a href="#jobs" class="tab" data-tab="jobs"><i class="fa-solid fa-briefcase"></i> Jobs</a>
+      <a href="#categories" class="tab" data-tab="categories"><i class="fa-solid fa-layer-group"></i> Categories</a>
+      <a href="#verifications" class="tab" data-tab="verifications"><i class="fa-solid fa-circle-check"></i> Verifications</a>
+      <a href="#reports" class="tab" data-tab="reports"><i class="fa-solid fa-flag"></i> Reports</a>
+      <a href="#audit" class="tab" data-tab="audit"><i class="fa-solid fa-clock-rotate-left"></i> Audit Log</a>
+      <a href="#export" class="tab" data-tab="export"><i class="fa-solid fa-file-csv"></i> Export</a>
+    </aside>
+    <main class="dash-main" id="main"><div class="spinner"></div></main>
+  </div>
+  <script src="/js/api.js"></script><script src="/js/main.js"></script>
+  <script>
+  (async function () {
+    const { API, esc, statusBadge, toast } = JobFinder;
+    if (!await JobFinder.requireRole('admin')) return;
+    const main = document.getElementById('main');
+    const views = {
+      async overview() {
+        const s = await API.get('/api/admin/stats');
+        const count = (arr, k, v) => (arr.find(x => x[k === 'role' ? 'role' : 'status'] === v) || {}).n || 0;
+        main.innerHTML = `<div class="dash-header"><h1>Platform Overview</h1></div>
+        <div class="kpi-grid">
+          <div class="kpi"><div class="kpi-num">${s.totals.users}</div><div class="kpi-lbl">Total users</div></div>
+          <div class="kpi"><div class="kpi-num">${s.totals.jobs}</div><div class="kpi-lbl">Total jobs</div></div>
+          <div class="kpi"><div class="kpi-num">${s.totals.applications}</div><div class="kpi-lbl">Applications</div></div>
+          <div class="kpi"><div class="kpi-num">${s.open_reports}</div><div class="kpi-lbl">Open reports</div></div>
+        </div>
+        <div class="grid grid-2">
+          <div class="card"><h3 style="margin-bottom:.6rem;">Users by role</h3>
+            ${s.users_by_role.map(r => `<p>${r.role}: <strong>${r.n}</strong></p>`).join('')}</div>
+          <div class="card"><h3 style="margin-bottom:.6rem;">Applications by status</h3>
+            ${s.applications_by_status.map(r => `<p>${statusBadge(r.status)} <strong>${r.n}</strong></p>`).join('')}</div>
+        </div>`;
+      },
+      async users() {
+        const d = await API.get('/api/admin/users');
+        main.innerHTML = `<div class="dash-header"><h1>Users</h1></div>
+        <div class="table-wrap"><table class="table"><thead><tr><th>Email</th><th>Role</th><th>Status</th><th>Registered</th><th>Actions</th></tr></thead>
+        <tbody>${d.users.map(u => `<tr><td>${esc(u.email)}</td><td>${esc(u.role)}</td><td>${statusBadge(u.status)}</td>
+          <td>${new Date(u.created_at).toLocaleDateString()}</td>
+          <td class="flex">${u.role !== 'admin' ? `
+            ${u.status !== 'suspended' ? `<button class="btn btn-ghost btn-sm" data-user="${u.id}:suspended">Suspend</button>` : ''}
+            ${u.status === 'suspended' ? `<button class="btn btn-outline btn-sm" data-user="${u.id}:active">Activate</button>` : ''}
+            <button class="btn btn-danger btn-sm" data-user="${u.id}:deleted"><i class="fa-solid fa-trash"></i></button>` : ''}</td></tr>`).join('')}</tbody></table></div>`;
+      },
+      async jobs() {
+        const d = await API.get('/api/admin/jobs');
+        main.innerHTML = `<div class="dash-header"><h1>Job moderation</h1></div>
+        <div class="table-wrap"><table class="table"><thead><tr><th>Title</th><th>Company</th><th>Status</th><th>Apps</th><th>Actions</th></tr></thead>
+        <tbody>${d.jobs.map(j => `<tr><td>${esc(j.title)}</td><td>${esc(j.company_name)}</td><td>${statusBadge(j.status)}</td><td>${j.applications}</td>
+          <td class="flex">${j.status !== 'active' ? `<button class="btn btn-outline btn-sm" data-job="${j.id}:approve">Approve</button>` : ''}
+          ${j.status !== 'rejected' ? `<button class="btn btn-ghost btn-sm" data-job="${j.id}:reject">Reject</button>` : ''}</td></tr>`).join('')}</tbody></table></div>`;
+      },
+      async categories() {
+        const d = await API.get('/api/admin/categories');
+        main.innerHTML = `<div class="dash-header"><h1>Job categories</h1></div>
+        <div class="card mb-2"><div class="flex"><input id="new-cat" placeholder="New category name">
+        <button class="btn btn-sm" id="add-cat"><i class="fa-solid fa-plus"></i> Add</button></div></div>
+        <div class="table-wrap"><table class="table"><tbody>${d.categories.map(c => `<tr>
+          <td>${esc(c.name)}</td><td class="text-muted">${c.slug}</td><td>${c.job_count} jobs</td>
+          <td>${!c.job_count ? `<button class="btn btn-danger btn-sm" data-cat="${c.id}"><i class="fa-solid fa-trash"></i></button>` : ''}</td></tr>`).join('')}</tbody></table></div>`;
+        document.getElementById('add-cat').onclick = async () => {
+          await API.post('/api/admin/categories', { name: document.getElementById('new-cat').value });
+          toast('Category added.', 'success'); views.categories();
+        };
+      },
+      async verifications() {
+        const d = await API.get('/api/admin/verifications');
+        main.innerHTML = `<div class="dash-header"><h1>Employer verification</h1></div>` +
+          (d.verifications.map(v => `<div class="card mb-1 flex" style="justify-content:space-between;">
+            <div><strong>${esc(v.company_name)}</strong> <span class="text-muted">(${esc(v.employer_email)})</span><br>${statusBadge(v.status)}</div>
+            ${v.status === 'pending' ? `<div class="flex">
+              <button class="btn btn-sm" data-ver="${v.id}:approve">Approve</button>
+              <button class="btn btn-ghost btn-sm" data-ver="${v.id}:reject">Reject</button></div>` : ''}
+          </div>`).join('') || '<div class="empty-state"><i class="fa-solid fa-circle-check"></i><p>No verification requests.</p></div>');
+      },
+      async reports() {
+        const d = await API.get('/api/admin/reports');
+        main.innerHTML = `<div class="dash-header"><h1>Reports</h1></div>` +
+          (d.reports.map(r => `<div class="card mb-1 flex" style="justify-content:space-between;">
+            <div><strong>${esc(r.target_type)} #${r.target_id}</strong> — ${esc(r.reason)}<br>
+            <span class="text-muted" style="font-size:.86rem;">by ${esc(r.reporter_email)} · ${esc(r.details || '')}</span><br>${statusBadge(r.status)}</div>
+            ${r.status === 'open' ? `<div class="flex">
+              <button class="btn btn-outline btn-sm" data-rep="${r.id}:resolved">Resolve</button>
+              <button class="btn btn-ghost btn-sm" data-rep="${r.id}:dismissed">Dismiss</button></div>` : ''}
+          </div>`).join('') || '<div class="empty-state"><i class="fa-solid fa-flag"></i><p>No reports.</p></div>');
+      },
+      async audit() {
+        const d = await API.get('/api/admin/audit-logs');
+        main.innerHTML = `<div class="dash-header"><h1>Audit log</h1></div>
+        <div class="table-wrap"><table class="table"><thead><tr><th>Time</th><th>User</th><th>Action</th><th>Entity</th><th>IP</th></tr></thead>
+        <tbody>${d.logs.map(l => `<tr><td>${new Date(l.created_at).toLocaleString()}</td><td>${esc(l.email || '—')}</td>
+          <td>${esc(l.action)}</td><td>${esc(l.entity || '')} #${l.entity_id ?? ''}</td><td>${esc(l.ip || '')}</td></tr>`).join('')}</tbody></table></div>`;
+      },
+      async export() {
+        main.innerHTML = `<div class="dash-header"><h1>Export reports (CSV)</h1></div>
+        <div class="grid grid-3">
+          ${['users', 'jobs', 'applications'].map(t => `<a class="card card-hover" style="text-align:center;" href="/api/admin/export/${t}">
+            <i class="fa-solid fa-file-csv" style="font-size:2rem;color:var(--success);"></i>
+            <h3 style="margin-top:.6rem;">${t[0].toUpperCase() + t.slice(1)}</h3>
+            <p class="text-muted" style="font-size:.88rem;">Download ${t}.csv</p></a>`).join('')}
+        </div>`;
+      },
+    };
+    document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', (e) => {
+      e.preventDefault();
+      document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+      t.classList.add('active'); views[t.dataset.tab]();
+    }));
+    main.addEventListener('click', async (e) => {
+      const u = e.target.closest('[data-user]')?.dataset.user;
+      const j = e.target.closest('[data-job]')?.dataset.job;
+      const v = e.target.closest('[data-ver]')?.dataset.ver;
+      const r = e.target.closest('[data-rep]')?.dataset.rep;
+      const c = e.target.closest('[data-cat]')?.dataset.cat;
+      if (u) { const [id, s] = u.split(':'); await API.patch(`/api/admin/users/${id}/status`, { status: s }); toast('User updated.', 'success'); views.users(); }
+      if (j) { const [id, dec] = j.split(':'); await API.patch(`/api/admin/jobs/${id}/review`, { decision: dec }); toast('Job reviewed.', 'success'); views.jobs(); }
+      if (v) { const [id, dec] = v.split(':'); await API.patch(`/api/admin/verifications/${id}`, { decision: dec }); toast('Verification updated.', 'success'); views.verifications(); }
+      if (r) { const [id, s] = r.split(':'); await API.patch(`/api/admin/reports/${id}`, { status: s }); toast('Report updated.', 'success'); views.reports(); }
+      if (c) { await API.del('/api/admin/categories/' + c); toast('Category deleted.'); views.categories(); }
+    });
+    views.overview();
+  })();
+  </script>
+</body>
+</html>
+<!-- about.html — replace the <main> block of the standard shell -->
+<main class="container section prose" style="max-width:820px;">
+  <h1 class="section-title">About JobFinder</h1>
+  <p>JobFinder is a modern job bank and career platform connecting talented job seekers with verified
+  employers. Our mission is simple: <strong>Find Your Dream Job. Build Your Future.</strong></p>
+  <h3>For Job Seekers</h3>
+  <ul><li>Search thousands of live vacancies with powerful filters (salary, type, remote/hybrid/on-site).</li>
+  <li>Build a rich profile with skills, experience, education, and a PDF resume.</li>
+  <li>Apply in one click and track every application from submission to offer.</li></ul>
+  <h3>For Employers</h3>
+  <ul><li>Publish vacancies in minutes and manage them from a clean dashboard.</li>
+  <li>Search the candidate database by skills, experience, location, and expected salary.</li>
+  <li>Shortlist, schedule interviews, and hire faster — with privacy-protected candidate contact.</li></ul>
+  <p class="text-muted">Questions? Visit our <a href="/contact.html">contact page</a>.</p>
+</main>
+
+<!-- contact.html — form + script -->
+<main class="container section" style="max-width:640px;">
+  <h1 class="section-title">Contact Us</h1>
+  <p class="section-sub">We usually reply within one business day.</p>
+  <div class="card"><div class="msg" id="c-msg"></div>
+  <form id="contact-form">
+    <div class="form-row">
+      <div class="field"><label>Name *</label><input name="name" required></div>
+      <div class="field"><label>Email *</label><input name="email" type="email" required></div>
+    </div>
+    <div class="field"><label>Subject *</label><input name="subject" required></div>
+    <div class="field"><label>Message *</label><textarea name="message" required></textarea></div>
+    <button class="btn" type="submit"><i class="fa-solid fa-paper-plane"></i> Send message</button>
+  </form></div>
+</main>
+<script>/* after api.js/main.js */
+document.getElementById('contact-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const msg = document.getElementById('c-msg');
+  try {
+    const d = await JobFinder.API.post('/api/contact', Object.fromEntries(new FormData(e.target)));
+    msg.className = 'msg msg-success show'; msg.textContent = d.message; e.target.reset();
+  } catch (err) { msg.className = 'msg msg-error show'; msg.textContent = err.message; }
+});
+</script>
+
+<!-- privacy.html — shell + prose -->
+<main class="container section prose" style="max-width:820px;">
+  <h1 class="section-title">Privacy Policy</h1>
+  <p><em>Last updated: 2025. This is a development sample; adapt for production legal review.</em></p>
+  <h3>Data we collect</h3>
+  <p>Account details (name, email, phone), profile information (experience, skills, education), resumes you upload, and application activity.</p>
+  <h3>How we use it</h3>
+  <ul><li>To match you with jobs and employers.</li><li>To process applications and notify you of status changes.</li>
+  <li>To keep the platform secure (audit logs, abuse prevention).</li></ul>
+  <h3>Your controls</h3>
+  <p>Set your profile to private to hide it from employer search. Contact details are only revealed to employers when your profile is public or you reach the shortlist stage. You may delete your account at any time from your profile page; deletion anonymizes your personal data.</p>
+  <h3>Security</h3>
+  <p>Passwords are hashed with bcrypt, all queries are parameterized, sessions use httpOnly cookies, and resume downloads are access-controlled.</p>
+</main>
+
+<!-- terms.html — shell + prose -->
+<main class="container section prose" style="max-width:820px;">
+  <h1 class="section-title">Terms &amp; Conditions</h1>
+  <p><em>Last updated: 2025. Development sample — adapt for production legal review.</em></p>
+  <h3>Accounts</h3>
+  <p>You must provide accurate information and keep your credentials confidential. One account per person or company.</p>
+  <h3>Employers</h3>
+  <p>Job listings must be genuine vacancies. Listings may be reviewed, paused, or removed. Only verified employers may browse the candidate database, and only candidates who applied to your jobs or made their profiles public may be contacted.</p>
+  <h3>Job seekers</h3>
+  <p>Profiles and resumes must be truthful. Duplicate applications are prevented; withdrawing an application is allowed before an offer is accepted.</p>
+  <h3>Acceptable use</h3>
+  <p>No scraping, spam, discrimination, or fraudulent content. Violations may result in suspension.</p>
+</main>
+<!-- about.html — replace the <main> block of the standard shell -->
+<main class="container section prose" style="max-width:820px;">
+  <h1 class="section-title">About JobFinder</h1>
+  <p>JobFinder is a modern job bank and career platform connecting talented job seekers with verified
+  employers. Our mission is simple: <strong>Find Your Dream Job. Build Your Future.</strong></p>
+  <h3>For Job Seekers</h3>
+  <ul><li>Search thousands of live vacancies with powerful filters (salary, type, remote/hybrid/on-site).</li>
+  <li>Build a rich profile with skills, experience, education, and a PDF resume.</li>
+  <li>Apply in one click and track every application from submission to offer.</li></ul>
+  <h3>For Employers</h3>
+  <ul><li>Publish vacancies in minutes and manage them from a clean dashboard.</li>
+  <li>Search the candidate database by skills, experience, location, and expected salary.</li>
+  <li>Shortlist, schedule interviews, and hire faster — with privacy-protected candidate contact.</li></ul>
+  <p class="text-muted">Questions? Visit our <a href="/contact.html">contact page</a>.</p>
+</main>
+
+<!-- contact.html — form + script -->
+<main class="container section" style="max-width:640px;">
+  <h1 class="section-title">Contact Us</h1>
+  <p class="section-sub">We usually reply within one business day.</p>
+  <div class="card"><div class="msg" id="c-msg"></div>
+  <form id="contact-form">
+    <div class="form-row">
+      <div class="field"><label>Name *</label><input name="name" required></div>
+      <div class="field"><label>Email *</label><input name="email" type="email" required></div>
+    </div>
+    <div class="field"><label>Subject *</label><input name="subject" required></div>
+    <div class="field"><label>Message *</label><textarea name="message" required></textarea></div>
+    <button class="btn" type="submit"><i class="fa-solid fa-paper-plane"></i> Send message</button>
+  </form></div>
+</main>
+<script>/* after api.js/main.js */
+document.getElementById('contact-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const msg = document.getElementById('c-msg');
+  try {
+    const d = await JobFinder.API.post('/api/contact', Object.fromEntries(new FormData(e.target)));
+    msg.className = 'msg msg-success show'; msg.textContent = d.message; e.target.reset();
+  } catch (err) { msg.className = 'msg msg-error show'; msg.textContent = err.message; }
+});
+</script>
+
+<!-- privacy.html — shell + prose -->
+<main class="container section prose" style="max-width:820px;">
+  <h1 class="section-title">Privacy Policy</h1>
+  <p><em>Last updated: 2025. This is a development sample; adapt for production legal review.</em></p>
+  <h3>Data we collect</h3>
+  <p>Account details (name, email, phone), profile information (experience, skills, education), resumes you upload, and application activity.</p>
+  <h3>How we use it</h3>
+  <ul><li>To match you with jobs and employers.</li><li>To process applications and notify you of status changes.</li>
+  <li>To keep the platform secure (audit logs, abuse prevention).</li></ul>
+  <h3>Your controls</h3>
+  <p>Set your profile to private to hide it from employer search. Contact details are only revealed to employers when your profile is public or you reach the shortlist stage. You may delete your account at any time from your profile page; deletion anonymizes your personal data.</p>
+  <h3>Security</h3>
+  <p>Passwords are hashed with bcrypt, all queries are parameterized, sessions use httpOnly cookies, and resume downloads are access-controlled.</p>
+</main>
+
+<!-- terms.html — shell + prose -->
+<main class="container section prose" style="max-width:820px;">
+  <h1 class="section-title">Terms &amp; Conditions</h1>
+  <p><em>Last updated: 2025. Development sample — adapt for production legal review.</em></p>
+  <h3>Accounts</h3>
+  <p>You must provide accurate information and keep your credentials confidential. One account per person or company.</p>
+  <h3>Employers</h3>
+  <p>Job listings must be genuine vacancies. Listings may be reviewed, paused, or removed. Only verified employers may browse the candidate database, and only candidates who applied to your jobs or made their profiles public may be contacted.</p>
+  <h3>Job seekers</h3>
+  <p>Profiles and resumes must be truthful. Duplicate applications are prevented; withdrawing an application is allowed before an offer is accepted.</p>
+  <h3>Acceptable use</h3>
+  <p>No scraping, spam, discrimination, or fraudulent content. Violations may result in suspension.</p>
+</main>
+mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS jobfinder_test;"
+DB_NAME=jobfinder_test node database/migrate.js
+DB_NAME=jobfinder_test node database/seed.js
+DB_NAME=jobfinder_test npm test
+database/    schema.sql, migrate.js, seed.js
+server/      index.js, config.js, db.js
+  middleware/  auth, csrf, rateLimit, validate, errors
+  routes/      auth, jobs, applications, saved, profiles, resumes,
+               candidates, notifications, admin, contact
+  utils/       audit + notification helpers
+public/      all pages, css/style.css, js/
+tests/       node:test API integration tests
